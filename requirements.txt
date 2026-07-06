@@ -1,0 +1,8 @@
+requests
+dnspython
+rich
+jinja2
+
+# Optional — only needed if you run ShadowMap with the --nmap flag.
+# Falls back to pure Python socket scanning automatically if not installed.
+python-nmap

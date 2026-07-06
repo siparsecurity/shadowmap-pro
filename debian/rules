@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Nothing to compile — pure Python scripts.
+
+override_dh_auto_install:
+	# Install the source tree into /usr/share/shadowmap
+	install -d debian/shadowmap/usr/share/shadowmap
+	cp -r dns_recon.py json_output.py main.py port_scanner.py \
+	      report_generator.py stealth.py subdomain_enum.py \
+	      tech_fingerprint.py vuln_hints.py \
+	      debian/shadowmap/usr/share/shadowmap/
+	if [ -d wordlists ]; then cp -r wordlists debian/shadowmap/usr/share/shadowmap/; fi
+	if [ -d templates ]; then cp -r templates debian/shadowmap/usr/share/shadowmap/; fi
+	# Install the launcher wrapper into /usr/bin
+	install -D -m 0755 debian/shadowmap.wrapper debian/shadowmap/usr/bin/shadowmap
+
+override_dh_auto_test:
+	# No automated test suite yet.
