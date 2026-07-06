@@ -1,3 +1,0 @@
-#!/bin/sh
-# Launcher for ShadowMap — runs the installed copy under /usr/share/shadowmap
-exec python3 /usr/share/shadowmap/main.py "$@"
