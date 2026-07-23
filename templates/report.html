@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ShadowMap Recon Report — {{ domain }}</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    padding: 0 0 60px 0;
+  }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 32px 40px;
+  }
+  header h1 {
+    margin: 0 0 6px 0;
+    font-size: 26px;
+    color: #fff;
+  }
+  header .meta {
+    color: var(--muted);
+    font-size: 14px;
+  }
+  header .brand {
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 40px;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin: 28px 0;
+  }
+  .stat-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px;
+    text-align: center;
+  }
+  .stat-card .num {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .stat-card .label {
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+  section {
+    margin: 36px 0;
+  }
+  section h2 {
+    font-size: 18px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+    color: #fff;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    margin-top: 12px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  tr:hover td {
+    background: rgba(88, 166, 255, 0.05);
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    margin: 2px 4px 2px 0;
+    background: rgba(88, 166, 255, 0.15);
+    color: var(--accent);
+    border: 1px solid rgba(88, 166, 255, 0.3);
+  }
+  .badge.cms { background: rgba(210, 153, 34, 0.15); color: var(--yellow); border-color: rgba(210,153,34,0.3); }
+  .badge.finding { background: rgba(248, 81, 73, 0.15); color: var(--red); border-color: rgba(248,81,73,0.3); }
+  .badge.port { background: rgba(63, 185, 80, 0.15); color: var(--green); border-color: rgba(63,185,80,0.3); }
+  .empty {
+    color: var(--muted);
+    font-style: italic;
+    padding: 16px 0;
+  }
+  .subhost {
+    color: #fff;
+    font-weight: 600;
+  }
+  .ip {
+    color: var(--muted);
+    font-family: monospace;
+    font-size: 13px;
+  }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 50px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="brand">ShadowMap</span> Recon Report</h1>
+  <div class="meta">Target: <strong>{{ domain }}</strong> &nbsp;|&nbsp; Generated: {{ generated_at }} &nbsp;|&nbsp; by Sipar Security</div>
+</header>
+
+<div class="container">
+
+  <div class="stats">
+    <div class="stat-card">
+      <div class="num">{{ stats.subdomains }}</div>
+      <div class="label">Subdomains</div>
+    </div>
+    <div class="stat-card">
+      <div class="num">{{ stats.open_ports }}</div>
+      <div class="label">Open Ports</div>
+    </div>
+    <div class="stat-card">
+      <div class="num">{{ stats.technologies }}</div>
+      <div class="label">Technologies</div>
+    </div>
+    <div class="stat-card">
+      <div class="num">{{ stats.findings }}</div>
+      <div class="label">Findings</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Discovered Hosts</h2>
+    {% if hosts %}
+    <table>
+      <tr>
+        <th>Subdomain</th>
+        <th>IP</th>
+        <th>Open Ports</th>
+      </tr>
+      {% for sub, data in hosts.items() %}
+      <tr>
+        <td class="subhost">{{ sub }}</td>
+        <td class="ip">{{ data.ip }}</td>
+        <td>
+          {% if data.ports %}
+            {% for p in data.ports %}
+              <span class="badge port">{{ p.port }}{% if p.service %} / {{ p.service }}{% endif %}</span>
+            {% endfor %}
+          {% else %}
+            <span class="empty">none recorded</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <div class="empty">No hosts discovered.</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Technology Fingerprints</h2>
+    {% set any_fp = false %}
+    <table>
+      <tr>
+        <th>Subdomain</th>
+        <th>Technologies</th>
+        <th>CMS</th>
+        <th>Missing Security Headers</th>
+      </tr>
+      {% for sub, fp in fingerprints.items() %}
+        {% if fp.technologies or fp.cms or fp.missing_security_headers %}
+          {% set any_fp = true %}
+          <tr>
+            <td class="subhost">{{ sub }}</td>
+            <td>
+              {% for tech, val in fp.technologies.items() %}
+                <span class="badge">{{ tech }}{% if val %}: {{ val }}{% endif %}</span>
+              {% endfor %}
+            </td>
+            <td>
+              {% for c in fp.cms %}
+                <span class="badge cms">{{ c.cms }} ({{ c.path }})</span>
+              {% endfor %}
+            </td>
+            <td>
+              {% for h in fp.missing_security_headers %}
+                <span class="badge">{{ h }}</span>
+              {% endfor %}
+            </td>
+          </tr>
+        {% endif %}
+      {% endfor %}
+    </table>
+    {% if not any_fp %}
+    <div class="empty">No technologies, CMS, or missing headers detected.</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Vulnerability Hints</h2>
+    {% set any_vuln = false %}
+    {% for sub, findings in vuln_hints.items() %}
+      {% if findings %}
+        {% set any_vuln = true %}
+        <h3 class="subhost">{{ sub }}</h3>
+        <table>
+          <tr><th>Finding</th><th>Detail</th></tr>
+          {% for f in findings %}
+            {% if f is mapping %}
+              <tr>
+                <td><span class="badge finding">{{ f.type or f.name or "finding" }}</span></td>
+                <td>{{ f.detail or f.description or f }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="2"><span class="badge finding">{{ f }}</span></td>
+              </tr>
+            {% endif %}
+          {% endfor %}
+        </table>
+      {% endif %}
+    {% endfor %}
+    {% if not any_vuln %}
+    <div class="empty">No findings flagged.</div>
+    {% endif %}
+  </section>
+
+  {% if dns %}
+  <section>
+    <h2>DNS Recon</h2>
+    <table>
+      <tr><th>Record</th><th>Value</th></tr>
+      {% for key, val in dns.items() %}
+      <tr>
+        <td>{{ key }}</td>
+        <td>{{ val }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </section>
+  {% endif %}
+
+  <footer>
+    Generated by ShadowMap v1.0 — Sipar Security &nbsp;|&nbsp; siparsecurity.github.io
+  </footer>
+
+</div>
+</body>
+</html>

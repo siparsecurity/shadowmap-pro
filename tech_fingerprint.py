@@ -7,6 +7,7 @@ import hashlib
 import random
 import string
 import requests
+import threading
 import concurrent.futures
 from rich.console import Console
 
@@ -14,6 +15,14 @@ console = Console()
 
 TIMEOUT = 5
 THREADS = 20
+
+# Hard wall-clock budget for fingerprinting a single host, end to end
+# (baseline probe + header fetch + all CMS path checks combined).
+# requests' `timeout=` does NOT bound total request time for a slow-trickle
+# response — it only resets a per-chunk read timer — so a single unlucky
+# host can otherwise block forever. This deadline is enforced independently
+# of what's happening inside the request itself (see fingerprint_host_bounded).
+PER_HOST_TIMEOUT = 30
 
 # Same soft-404 tolerance used in vuln_hints.py — see get_baseline() below.
 LENGTH_DIFF_THRESHOLD = 0.15
@@ -67,6 +76,10 @@ SECURITY_HEADERS = [
     "Referrer-Policy",
     "Permissions-Policy",
 ]
+
+# Module-level flag so we only print the fallback warning once per run,
+# not once per host (would be spammy on a 186-host scan).
+_fallback_warned = False
 
 
 # ─── Core fingerprinting ───────────────────────────────────────────────────────
@@ -168,13 +181,28 @@ def detect_cms_by_paths(base_url: str) -> list:
     detected = []
     baseline = get_baseline(base_url)
 
+    if baseline is None:
+        # The random-path probe itself failed (timeout / connection error /
+        # TLS failure). The host is unresponsive or unreachable on this
+        # base_url, so the real CMS paths below will almost certainly fail
+        # the same way. Previously we'd still burn up to 27 more requests
+        # (9 CMS x up to 3 paths), each eating a full TIMEOUT-second wait,
+        # per host — that's what caused runs to look "stuck" on large
+        # brute-forced subdomain lists full of dead/filtered hosts.
+        return detected
+
+    # Reuse one connection across all path checks for this host instead of
+    # opening a fresh TCP/TLS handshake per request — meaningfully faster
+    # across ~27 requests per host.
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0 (ShadowMap/1.0)"})
+
     for cms, paths in CMS_PATHS.items():
         for path in paths:
             url = base_url.rstrip("/") + path
             try:
-                resp = requests.get(
+                resp = session.get(
                     url, timeout=TIMEOUT, verify=False,
-                    headers={"User-Agent": "Mozilla/5.0 (ShadowMap/1.0)"},
                     allow_redirects=False
                 )
                 if resp.status_code in (200, 301, 302, 403):
@@ -184,24 +212,18 @@ def detect_cms_by_paths(base_url: str) -> list:
                     break  # One hit per CMS is enough
             except Exception:
                 continue
+
+    session.close()
     return detected
 
 
-def fingerprint_host(subdomain: str, ports: list) -> dict:
+def _build_base_urls(subdomain: str, ports: list) -> list:
     """
-    Full fingerprinting for a single host.
-    Tries HTTPS first, falls back to HTTP.
+    Build candidate base URLs for a host from its known open ports.
+    Returns [] if no web-relevant ports are known.
     """
-    result = {
-        "technologies": {},
-        "cms": [],
-        "missing_security_headers": [],
-        "raw_headers": {}
-    }
-
-    # Determine base URLs from open ports
     base_urls = []
-    port_nums = [p["port"] for p in ports]
+    port_nums = [p["port"] for p in (ports or [])]
 
     if 443 in port_nums:
         base_urls.append(f"https://{subdomain}")
@@ -212,29 +234,122 @@ def fingerprint_host(subdomain: str, ports: list) -> dict:
     if 8080 in port_nums:
         base_urls.append(f"http://{subdomain}:8080")
 
+    return base_urls
+
+
+def fingerprint_host(subdomain: str, ports: list) -> dict:
+    """
+    Full fingerprinting for a single host.
+    Tries HTTPS first, falls back to HTTP.
+
+    If `ports` is empty (e.g. port scanning was skipped with --skip-ports,
+    or the port scanner simply didn't run on this host), this now falls
+    back to probing https:// then http:// directly on default ports,
+    instead of silently skipping the host. Previously an empty `ports`
+    list caused base_urls to stay empty and fingerprint_host() returned
+    an all-empty result with no warning — which is why a full
+    --skip-ports run reported 0 technologies / 0 CMS hits across every
+    single host, not because detection failed, but because it never ran.
+    """
+    global _fallback_warned
+
+    result = {
+        "technologies": {},
+        "cms": [],
+        "missing_security_headers": [],
+        "raw_headers": {}
+    }
+
+    base_urls = _build_base_urls(subdomain, ports)
+    used_fallback = False
+
     if not base_urls:
-        # No web ports — skip
-        return result
+        # No port data available — fall back to probing defaults directly
+        # rather than skipping the host outright.
+        base_urls = [f"https://{subdomain}", f"http://{subdomain}"]
+        used_fallback = True
+        if not _fallback_warned:
+            console.print(
+                "[yellow][!] No port data available for one or more hosts "
+                "(port scan skipped or empty) — falling back to direct "
+                "https/http probing on default ports for fingerprinting.[/yellow]"
+            )
+            _fallback_warned = True
 
-    base_url = base_urls[0]
-    resp = get_http_response(base_url)
+    resp = None
+    working_base_url = None
+    for candidate in base_urls:
+        resp = get_http_response(candidate)
+        if resp:
+            working_base_url = candidate
+            break
 
     if not resp:
-        # Try fallback
-        if len(base_urls) > 1:
-            resp = get_http_response(base_urls[1])
-
-    if not resp:
+        # Genuinely unreachable on any candidate — not a bug, just a dead host
+        # (or one on a nonstandard port we didn't try). Record that fact
+        # instead of returning an indistinguishable empty result.
+        result["fingerprint_status"] = "unreachable"
+        result["fallback_used"] = used_fallback
         return result
 
     headers = dict(resp.headers)
     result["raw_headers"] = headers
     result["technologies"] = detect_from_headers(headers)
     result["missing_security_headers"] = detect_missing_security_headers(headers)
-    result["cms"] = detect_cms_by_paths(base_url)
-    result["base_url"] = base_url
+    result["cms"] = detect_cms_by_paths(working_base_url)
+    result["base_url"] = working_base_url
+    result["fallback_used"] = used_fallback
+    result["fingerprint_status"] = "ok"
 
     return result
+
+
+def _default_result() -> dict:
+    return {
+        "technologies": {},
+        "cms": [],
+        "missing_security_headers": [],
+        "raw_headers": {},
+    }
+
+
+def fingerprint_host_bounded(subdomain: str, ports: list, deadline: float = PER_HOST_TIMEOUT) -> dict:
+    """
+    Run fingerprint_host() with a hard wall-clock deadline, independent of
+    whatever requests/urllib3 is doing internally.
+
+    requests' timeout=N does not bound total time for a slow-trickling
+    response (the read timer resets on every successful chunk), so a
+    single unlucky host can block the calling thread indefinitely. To
+    guard against that, the actual work runs in its own daemon thread;
+    we wait up to `deadline` seconds for it, and if it hasn't finished,
+    we simply give up on it and move on.
+
+    Because the sub-thread is daemon=True, an abandoned/stuck thread can
+    NEVER block program exit — unlike ThreadPoolExecutor's own worker
+    threads, which are non-daemon and which Python's interpreter shutdown
+    will wait on forever via an atexit join (this was the actual cause of
+    runs hanging even after Ctrl-C).
+    """
+    holder = {}
+
+    def _run():
+        holder["result"] = fingerprint_host(subdomain, ports)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=deadline)
+
+    if t.is_alive():
+        # Still running — abandon it. It will keep running in the
+        # background (harmless, and can never block exit since it's
+        # daemon), but we don't wait on it any further.
+        result = _default_result()
+        result["fingerprint_status"] = "timed_out"
+        result["fallback_used"] = False
+        return result
+
+    return holder.get("result", {**_default_result(), "fingerprint_status": "error"})
 
 
 # ─── Main entry ───────────────────────────────────────────────────────────────
@@ -245,14 +360,21 @@ def fingerprint_all(scan_results: dict) -> dict:
     scan_results: { subdomain: { ip, ports } }
     Returns: { subdomain: { ...fingerprint data } }
     """
+    global _fallback_warned
+    _fallback_warned = False  # reset per run so the warning can show again next time
+
     console.print(f"\n[bold cyan][*] Fingerprinting technologies on {len(scan_results)} hosts...[/bold cyan]")
 
     fp_results = {}
 
     def _fp(item):
         sub, data = item
-        return sub, fingerprint_host(sub, data["ports"])
+        return sub, fingerprint_host_bounded(sub, data.get("ports"))
 
+    # Each _fp call is now guaranteed to return within PER_HOST_TIMEOUT no
+    # matter what happens inside fingerprint_host, so the outer pool's own
+    # worker threads can never hang either — safe to let the context
+    # manager wait for a clean shutdown.
     with concurrent.futures.ThreadPoolExecutor(max_workers=THREADS) as executor:
         futures = list(executor.map(_fp, scan_results.items()))
 
@@ -261,5 +383,16 @@ def fingerprint_all(scan_results: dict) -> dict:
 
     total_tech = sum(len(v["technologies"]) for v in fp_results.values())
     total_cms = sum(len(v["cms"]) for v in fp_results.values())
+    unreachable = sum(1 for v in fp_results.values() if v.get("fingerprint_status") == "unreachable")
+    timed_out = sum(1 for v in fp_results.values() if v.get("fingerprint_status") == "timed_out")
+    fallback_count = sum(1 for v in fp_results.values() if v.get("fallback_used"))
+
     console.print(f"[bold green][✓] Fingerprinting done — {total_tech} technologies, {total_cms} CMS hits detected[/bold green]")
+    if fallback_count:
+        console.print(f"[dim]    ({fallback_count} hosts fingerprinted via https/http fallback due to missing port data)[/dim]")
+    if unreachable:
+        console.print(f"[dim]    ({unreachable} hosts unreachable on any probed port)[/dim]")
+    if timed_out:
+        console.print(f"[yellow]    ({timed_out} hosts exceeded the {PER_HOST_TIMEOUT}s per-host fingerprint budget and were skipped)[/yellow]")
+
     return fp_results
